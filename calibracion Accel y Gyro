@@ -1,0 +1,225 @@
+// BIBLIOTECAS //
+
+#include "mbed.h"
+#include "math.h"
+
+// ESCLAVOS INDIRECTOS
+
+#define MPU9250_address 0xD0// 7 bit i2c Enderego da MPU9250 (giroscOpio e acelerometro) // Escalas do girOscopio 
+#define MAG_ADDRESS_AK8963 0X18
+
+//
+
+#define GYRO_FULL_SCALE_250_DPS 0x00 // SCALE 250 (./s) = 0 (0x00 = 0001001000) 
+#define GYRO_FULL_SCALE_500_DPS 0x08 // SCALE _500 (0/3) = 1 (0x08 = 0001011000) 
+#define GYRO_FULL_SCALE_1000_DPS 0x10 // SCALE _1000 ('/s) = 2 (0x10 = 0001101000)
+#define GYRO_FULL_SCALE_2000_DPS 0x18 // Escalas GYRO_FULL_SCALE_2000_DPS do acelerometro Ox18 
+
+// SCALE _2000 (°is) = 3 (Ox18 = 0001111000)
+
+#define ACC_FULL_SCALE_2_G 0x00 // SCALE_ 2_G (g) = 0 (0x00 = 0001001000) 
+#define ACC_FULL_SCALE_4_G 0x08 // SCALE_ 4_G (g) = 1 (0x08 = 0001011000) 
+#define ACC_FULL_SCALE_8_G 0x10 // SCALE_ 8_G (g) = 2 (0x10 = 0001101000) 
+#define ACC_FULL_SCALE_16_G 0x18 // SCALE_ 16_G (g) = 3 (0x18 = 0001111000) 
+
+// Escalas de conversion
+
+#define SENSITIVITY_ACCEL       2.0/32768.0
+#define SENSITIVITY_GYRO        250.0/32768.0
+#define SENSITIVITY_TEMP        333.87
+#define TEMP_OFFSET             21
+#define SENSITIVITY_mag        (10.0*4800.0)/32768.0
+
+//Declaracion de variables
+//Raw Tipo entero
+
+int16_t raw_accelx, raw_accely, raw_accelz;
+int16_t raw_gyrox, raw_gyroy, raw_gyroz;
+int16_t raw_magx, raw_magy, raw_magz;
+int16_t raw_temp;
+
+//valores de offsets de tipo float
+float offset_accelx = 0.0, offset_accely = 0.0, offset_accelz = 0.0;
+float offset_gyrox = 0.0, offset_gyroy = 0.0, offset_gyroz = 0.0;
+
+
+//maximos y minimos para los offsets
+float max_accelx = -32768.0, min_accelx = 32768.0, max_accely = -32768.0, min_accely = 32768.0, max_accelz = -32768.0, min_accelz = 32768.0;
+float max_gyrox = -32768.0, min_gyrox = 32768.0, max_gyroy = -32768.0, min_gyroy = 32768.0, max_gyroz = -32768.0, min_gyroz = 32768.0;
+
+
+//Tipo float "Salidas calibradas"
+float accelx, accely, accelz;
+float gyrox, gyroy, gyroz;
+float magx, magy, magz;
+float temp;
+
+//Bytes
+char cmd[2];
+char data[1];
+char GirAcel[14];
+char mag[7];
+
+float buffer[500][8];
+int i,offset_samples = 100;
+Timer t;
+float timer=0;
+
+Serial pc(SERIAL_TX, SERIAL_RX);
+I2C i2c(PB_9, PB_8);
+
+int main()
+{
+    // Desativa modo de hibernacion de MPU9250
+    cmd[0] = 0x6B;
+    cmd[1] = 0x00;
+    i2c.write(MPU9250_address, cmd, 2);
+
+    pc.printf("TEST PARA GIROSCOPIO, ACELEROMETRO, MAGETOMETRO\n\r");
+//
+// Quem sou eu para a MPU9250 (giroscOpio e acelerOmetro)
+//
+    pc.printf("Test conexion MPU9250... \n\r"); // Verifica a conexao
+    cmd[0] = 0x75;
+    i2c.write(MPU9250_address, cmd, 1);
+    i2c.read(MPU9250_address, data, 1);
+    if (data[0] != 0x73) { // DEFAOLT_REGISTER WHO AM I MPU9250 0x68
+        pc.printf("Erro de conexion con MPU9250 \n\r");
+        pc.printf("UPS_No_soy_el_MPU9250_quien_soy:S. I am: %#x \n\r",data[0]);
+        pc.printf("\n\r");
+        while(1);
+    } else {
+        pc.printf("conectado a la MPU \n\r");
+        pc.printf("Soy la MPU :S. I am: %#x \n\r", data[0]);
+        pc.printf("\n\r" );
+    }
+    wait(0.1);
+
+
+// desactiva el modo de hibernacion de AK8963
+
+    cmd[0] = 0x37;
+    cmd[1] = 0x02;
+
+    i2c.write(MPU9250_address, cmd, 2);
+
+// configuracion de magometro AK8963
+
+    cmd[0] = 0x0A;
+    cmd[1] = 0x16;
+    i2c.write(MAG_ADDRESS_AK8963,  cmd, 2);
+    cmd[0]=0x00;
+    i2c.write(MAG_ADDRESS_AK8963,  cmd, 1);
+    i2c.read(MAG_ADDRESS_AK8963, data, 1);
+
+    if (data[0] != 0x48) { // DEFAOLT_REGISTER WHO AM I MPU9250 0x68
+        pc.printf("Error de conexion AK8963\n\r");
+        pc.printf("no soy AK8963, quien soy yo? :S. I am: %#x \n\r",data[0]);
+        pc.printf("\n\r");
+        while(1);
+    } else {
+        pc.printf("conectado a la AK8963 \n\r");
+        pc.printf("Soy la AK8963 :S. I am: %#x \n\r", data[0]);
+        pc.printf("\n\r" );
+    }
+    wait(0.1);
+
+      //calibraciosn del giroscopio y acelerometro
+
+   while(1) {
+        pc.printf("calibracion del giroscopio y acelerometro \n\r");
+        wait(2);
+        pc.printf("coloque la uimu en una posicion horizontal con prependicular al eje z \n\r ");
+        wait(2);
+        pc.printf("leyendo los sensores por primera vez...\n\r");
+        for(i=0; i<offset_samples; i++){
+                    cmd[0]=0x3B;
+                    i2c.write(MPU9250_address, cmd, 1);
+                    i2c.read(MPU9250_address, GirAcel, 14);
+                    raw_accelx = GirAcel[0]<<8 | GirAcel[1];
+                    raw_accely = GirAcel[2]<<8 | GirAcel[3];
+                    raw_accelz = GirAcel[4]<<8 | GirAcel[5];
+                    raw_temp = GirAcel[6]<<8 | GirAcel[7];
+                    raw_gyrox = GirAcel[8]<<8 | GirAcel[9];
+                    raw_gyroy = GirAcel[10]<<8 | GirAcel[11];
+                    raw_gyroz = GirAcel[12]<<8 | GirAcel[13];
+                    wait(0.01);     
+                   }
+                pc.printf("leyendo los sensores y calculando los offsets... \n\r");
+                  for(i=0; i<offset_samples; i++){
+                    cmd[0]=0x3B;
+                    i2c.write(MPU9250_address, cmd, 1);
+                    i2c.read(MPU9250_address, GirAcel, 14);
+                    raw_accelx = GirAcel[0]<<8 | GirAcel[1];
+                    raw_accely = GirAcel[2]<<8 | GirAcel[3];
+                    raw_accelz = GirAcel[4]<<8 | GirAcel[5];
+                    raw_temp = GirAcel[6]<<8 | GirAcel[7];
+                    raw_gyrox = GirAcel[8]<<8 | GirAcel[9];
+                    raw_gyroy = GirAcel[10]<<8 | GirAcel[11];
+                    raw_gyroz = GirAcel[12]<<8 | GirAcel[13];
+                    //maximos y minimos para el acelerometro 
+                    // eje x
+                  if(raw_accelx >= max_accelx){
+                    max_accelx = raw_accelx;
+                    } 
+                  if(raw_accelx <= min_accelx){
+                    min_accelx = raw_accelx;
+                    }
+                    // eje y
+                  if(raw_accely >= max_accely){
+                    max_accely = raw_accely;
+                    }    
+                  if(raw_accely <= min_accely){
+                    min_accely = raw_accely;
+                    } 
+                    // eje z
+                  if(raw_accelz >= max_accelz){
+                    max_accelz = raw_accelz;
+                    } 
+                  if(raw_accelz <= min_accelz){
+                    min_accelz = raw_accelz;
+                    } 
+                    //minomos y maximos para el giroscopio
+                    //eje x
+                 if(raw_gyrox >= max_gyrox){
+                    max_gyrox = raw_gyrox;
+                    } 
+                 if(raw_gyrox <= min_gyrox){
+                    min_gyrox = raw_gyrox;
+                    } 
+                    // eje y
+                if(raw_gyroy >= max_gyroy){
+                    max_gyroy = raw_gyroy;
+                    } 
+                if(raw_gyroy <= min_gyroy){
+                    min_gyroy = raw_gyroy;
+                    } 
+                    // eje z
+                if(raw_gyroz >= max_gyroz){
+                    max_gyroz = raw_gyroz;
+                    } 
+                if(raw_gyroz <= min_gyroz){
+                    min_gyroz = raw_gyroz;
+                    }
+                    wait(0.01);
+                    }
+                  //calculando los offsets de calibracion
+                  //acelerometro
+                    offset_accelx = (max_accelx + min_accelx)/2;
+                    offset_accely = (max_accely + min_accely)/2;
+                    offset_accelz = (max_accelz + min_accelz)/2;
+                  //giroscopio
+                    offset_gyrox = (max_gyrox + min_gyrox)/2;
+                    offset_gyroy = (max_gyroy + min_gyroy)/2;
+                    offset_gyroz = (max_gyroz + min_gyroz)/2;
+                    
+                    pc.printf("calibracion finalizada del acelerometro y girocopio \n\r");
+                    pc.printf("offset_accex = %.2f, offset_accely = %.2f, offset_accelz = %.2f, offset_gyrox = %.2f, offset_gyroy = %.2f, offset_gyroz = %.2f \n\r ",offset_accelx, offset_accely, offset_accelz, offset_gyrox, offset_gyroy, offset_gyroz);
+                    pc.printf("calibracion finalizada");
+                    wait(100);
+                    
+            
+        
+    }
+}
+
